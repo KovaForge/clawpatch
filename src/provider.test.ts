@@ -14,11 +14,9 @@ const {
   addCodexConfigArgs,
   addCodexModelArgs,
   addCodexSandboxArgs,
-  assertClaudeAuthContextSupported,
   assertClaudeVersionAllowed,
   buildAcpxJsonArgs,
   claudeArgs,
-  claudeAuthContext,
   claudeEffort,
   claudeEnv,
   claudeExitCode,
@@ -35,15 +33,36 @@ const {
   extractCursorJson,
   extractClaudeStructuredOutput,
   extractOpencodeJson,
+  formatZodError,
+  formatZodIssue,
   parseAcpxJsonOutput,
   parseAcpxAgent,
   parseClaudeVersion,
   parseCodexJson,
   parseSemver,
+  parseReviewOutput,
+  parseOrThrow,
   piThinkingLevel,
   providerExitCode,
   providerJsonSchema,
 } = __testing;
+
+function makeFinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    title: "Sample finding",
+    category: "bug",
+    severity: "medium",
+    confidence: "high",
+    evidence: [],
+    reasoning: "Sample reasoning.",
+    reproduction: null,
+    recommendation: "Sample recommendation.",
+    whyTestsDoNotAlreadyCoverThis: "Tests do not encode this case.",
+    suggestedRegressionTest: null,
+    minimumFixScope: "Touch only the offending line.",
+    ...overrides,
+  };
+}
 
 function withEnv(name: string, value: string | undefined, fn: () => void): void {
   const previous = process.env[name];
@@ -386,20 +405,6 @@ describe("providerJsonSchema", () => {
     }
   });
 
-  it("normalizes nullable evidence line schemas for Codex strict schemas", () => {
-    const schema = reviewJsonSchema as Record<string, unknown>;
-    const findings = propertySchema(schema, "findings");
-    const finding = itemSchema(findings);
-    const evidence = itemSchema(propertySchema(finding, "evidence"));
-    const endLine = propertySchema(evidence, "endLine");
-
-    expect(endLine["anyOf"]).toBeUndefined();
-    expect(endLine["type"]).toEqual(["integer", "null"]);
-    expect(schemaKeys(endLine)).not.toContain("minimum");
-    expect(evidence["additionalProperties"]).toBe(false);
-    expect(evidence["required"]).toEqual(Object.keys(propertiesOf(evidence)));
-  });
-
   it("keeps object schemas strict even when parser input fields are optional", () => {
     const schema = providerJsonSchema(reviewOutputSchema) as Record<string, unknown>;
     const findings = propertySchema(schema, "findings");
@@ -713,7 +718,6 @@ describe("Claude provider helpers", () => {
       { type: "object" },
       { model: null, reasoningEffort: null, skipGitRepoCheck: false },
       true,
-      "isolated",
     );
 
     expect(args).toEqual([
@@ -741,27 +745,12 @@ describe("Claude provider helpers", () => {
       { type: "object" },
       { model: null, reasoningEffort: null, skipGitRepoCheck: false },
       false,
-      "isolated",
     );
 
     expect(args).toContain("default");
     expect(args).toContain("acceptEdits");
     expect(args).not.toContain("Read,Grep,Glob");
     expect(args).not.toContain("dontAsk");
-  });
-
-  it("uses safe mode instead of bare mode for host auth context", () => {
-    const args = claudeArgs(
-      { type: "object" },
-      { model: null, reasoningEffort: null, skipGitRepoCheck: false },
-      true,
-      "host",
-    );
-
-    expect(args).toContain("--safe-mode");
-    expect(args).not.toContain("--bare");
-    expect(args).toContain("--strict-mcp-config");
-    expect(args).toContain("--disable-slash-commands");
   });
 
   it("passes model and supported effort while ignoring skipGitRepoCheck", () => {
@@ -794,7 +783,7 @@ describe("Claude provider helpers", () => {
       CLAUDE_CODE_OAUTH_TOKEN: "must-not-leak",
     };
 
-    expect(claudeEnv(false, "/tmp/claude", "isolated")).toEqual({
+    expect(claudeEnv(false, "/tmp/claude")).toEqual({
       PATH: "/bin",
       HOME: "/tmp/claude/home",
       XDG_CONFIG_HOME: "/tmp/claude/xdg-config",
@@ -805,7 +794,7 @@ describe("Claude provider helpers", () => {
       TMP: "/tmp/claude",
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
     });
-    expect(claudeEnv(true, "/tmp/claude", "isolated")).toEqual({
+    expect(claudeEnv(true, "/tmp/claude")).toEqual({
       PATH: "/bin",
       HOME: "/tmp/claude/home",
       XDG_CONFIG_HOME: "/tmp/claude/xdg-config",
@@ -817,53 +806,6 @@ describe("Claude provider helpers", () => {
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
       ANTHROPIC_API_KEY: "secret",
     });
-  });
-
-  it("exposes only Claude host auth locators in host auth context", () => {
-    process.env = {
-      PATH: "/bin",
-      HOME: "/host-home",
-      USERPROFILE: "C:\\Users\\operator",
-      CLAUDE_CONFIG_DIR: "/host-claude-config",
-      CLAUDE_CODE_OAUTH_TOKEN: "oauth-token",
-      ANTHROPIC_API_KEY: "api-key",
-      OPENAI_API_KEY: "must-not-leak",
-      DATABASE_URL: "must-not-leak",
-    };
-
-    expect(claudeEnv(true, "/tmp/claude", "host")).toEqual({
-      PATH: "/bin",
-      HOME: "/host-home",
-      USERPROFILE: "C:\\Users\\operator",
-      CLAUDE_CONFIG_DIR: "/host-claude-config",
-      XDG_CONFIG_HOME: "/tmp/claude/xdg-config",
-      XDG_CACHE_HOME: "/tmp/claude/xdg-cache",
-      XDG_DATA_HOME: "/tmp/claude/xdg-data",
-      TMPDIR: "/tmp/claude",
-      TEMP: "/tmp/claude",
-      TMP: "/tmp/claude",
-      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
-      CLAUDE_CODE_OAUTH_TOKEN: "oauth-token",
-      ANTHROPIC_API_KEY: "api-key",
-    });
-  });
-
-  it("validates Claude auth context and safe-mode version", () => {
-    delete process.env["CLAWPATCH_CLAUDE_AUTH_CONTEXT"];
-    expect(claudeAuthContext()).toBe("isolated");
-
-    process.env["CLAWPATCH_CLAUDE_AUTH_CONTEXT"] = "host";
-    expect(claudeAuthContext()).toBe("host");
-    expect(() => assertClaudeAuthContextSupported("2.1.169 (Claude Code)", "host")).not.toThrow();
-    expect(() => assertClaudeAuthContextSupported("2.1.168 (Claude Code)", "host")).toThrow(
-      /2\.1\.169 or newer/u,
-    );
-    expect(() => assertClaudeAuthContextSupported("unknown", "host")).toThrow(
-      /2\.1\.169 or newer/u,
-    );
-
-    process.env["CLAWPATCH_CLAUDE_AUTH_CONTEXT"] = "everything";
-    expect(() => claudeAuthContext()).toThrow(/must be isolated or host/u);
   });
 
   it("passes Vertex AI auth env vars only when auth is included", () => {
@@ -884,7 +826,7 @@ describe("Claude provider helpers", () => {
       OPENAI_API_KEY: "must-not-leak",
     };
 
-    expect(claudeEnv(false, "/tmp/claude", "isolated")).toEqual({
+    expect(claudeEnv(false, "/tmp/claude")).toEqual({
       PATH: "/bin",
       HOME: "/tmp/claude/home",
       XDG_CONFIG_HOME: "/tmp/claude/xdg-config",
@@ -895,7 +837,7 @@ describe("Claude provider helpers", () => {
       TMP: "/tmp/claude",
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
     });
-    expect(claudeEnv(true, "/tmp/claude", "isolated")).toMatchObject({
+    expect(claudeEnv(true, "/tmp/claude")).toMatchObject({
       CLAUDE_CODE_USE_VERTEX: "1",
       ANTHROPIC_BASE_URL: "https://llm-gateway.example.com",
       ANTHROPIC_AUTH_TOKEN: "gateway-token",
@@ -909,7 +851,7 @@ describe("Claude provider helpers", () => {
       CLOUDSDK_CORE_PROJECT: "sdk-project",
       CLAUDE_CODE_SKIP_VERTEX_AUTH: "1",
     });
-    expect(claudeEnv(true, "/tmp/claude", "isolated")).not.toHaveProperty("OPENAI_API_KEY");
+    expect(claudeEnv(true, "/tmp/claude")).not.toHaveProperty("OPENAI_API_KEY");
   });
 
   it("passes Bedrock auth env vars only when auth is included", () => {
@@ -932,10 +874,8 @@ describe("Claude provider helpers", () => {
       DATABASE_URL: "must-not-leak",
     };
 
-    expect(claudeEnv(false, "/tmp/claude", "isolated")).not.toHaveProperty(
-      "CLAUDE_CODE_USE_BEDROCK",
-    );
-    expect(claudeEnv(true, "/tmp/claude", "isolated")).toMatchObject({
+    expect(claudeEnv(false, "/tmp/claude")).not.toHaveProperty("CLAUDE_CODE_USE_BEDROCK");
+    expect(claudeEnv(true, "/tmp/claude")).toMatchObject({
       CLAUDE_CODE_USE_BEDROCK: "1",
       CLAUDE_CODE_SKIP_BEDROCK_AUTH: "1",
       ANTHROPIC_BEDROCK_BASE_URL: "https://bedrock-runtime.us-east-1.amazonaws.com",
@@ -951,7 +891,7 @@ describe("Claude provider helpers", () => {
       AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/clawpatch",
       AWS_WEB_IDENTITY_TOKEN_FILE: "/var/aws/web-identity-token",
     });
-    expect(claudeEnv(true, "/tmp/claude", "isolated")).not.toHaveProperty("DATABASE_URL");
+    expect(claudeEnv(true, "/tmp/claude")).not.toHaveProperty("DATABASE_URL");
   });
 
   it("passes AWS_PROFILE only with explicit AWS config or credentials file paths", () => {
@@ -962,17 +902,17 @@ describe("Claude provider helpers", () => {
       AWS_PROFILE: "clawpatch",
     };
 
-    expect(claudeEnv(true, "/tmp/claude", "isolated")).not.toHaveProperty("AWS_PROFILE");
+    expect(claudeEnv(true, "/tmp/claude")).not.toHaveProperty("AWS_PROFILE");
 
     process.env["AWS_CONFIG_FILE"] = "/var/aws/config";
-    expect(claudeEnv(true, "/tmp/claude", "isolated")).toMatchObject({
+    expect(claudeEnv(true, "/tmp/claude")).toMatchObject({
       AWS_CONFIG_FILE: "/var/aws/config",
       AWS_PROFILE: "clawpatch",
     });
 
     delete process.env["AWS_CONFIG_FILE"];
     process.env["AWS_SHARED_CREDENTIALS_FILE"] = "/var/aws/credentials";
-    expect(claudeEnv(true, "/tmp/claude", "isolated")).toMatchObject({
+    expect(claudeEnv(true, "/tmp/claude")).toMatchObject({
       AWS_SHARED_CREDENTIALS_FILE: "/var/aws/credentials",
       AWS_PROFILE: "clawpatch",
     });
@@ -984,11 +924,11 @@ describe("Claude provider helpers", () => {
       ANTHROPIC_API_KEY: "secret",
     };
 
-    expect(claudeEnv(true, "C:\\Temp\\claude", "isolated")).toMatchObject({
+    expect(claudeEnv(true, "C:\\Temp\\claude")).toMatchObject({
       Path: "C:\\Tools",
       ANTHROPIC_API_KEY: "secret",
     });
-    expect(claudeEnv(true, "C:\\Temp\\claude", "isolated")).not.toHaveProperty("PATH");
+    expect(claudeEnv(true, "C:\\Temp\\claude")).not.toHaveProperty("PATH");
   });
 
   it("extracts structured_output from Claude JSON envelopes", () => {
@@ -1052,32 +992,6 @@ describe("Claude provider helpers", () => {
     throw new Error("expected Claude provider failure");
   });
 
-  it("classifies string Claude error envelopes", () => {
-    try {
-      extractClaudeStructuredOutput(JSON.stringify({ error: "authentication_failed" }));
-    } catch (err) {
-      expect(err).toBeInstanceOf(ClawpatchError);
-      expect((err as ClawpatchError).message).toContain("authentication_failed");
-      expect((err as ClawpatchError).exitCode).toBe(4);
-      return;
-    }
-    throw new Error("expected Claude provider failure");
-  });
-
-  it("does not preview arbitrary or token-shaped string Claude errors", () => {
-    for (const secret of ["SOURCE CONTEXT SECRET", "sk-ant-secret-shaped-value"]) {
-      try {
-        extractClaudeStructuredOutput(JSON.stringify({ error: secret }));
-      } catch (err) {
-        expect(err).toBeInstanceOf(ClawpatchError);
-        expect((err as ClawpatchError).message).toBe("claude provider error: provider-error");
-        expect((err as ClawpatchError).message).not.toContain(secret);
-        continue;
-      }
-      throw new Error("expected Claude provider failure");
-    }
-  });
-
   it("does not include stdout or prompt previews in Claude failure messages", () => {
     const message = claudeFailureMessage("SOURCE_CONTEXT_SECRET", "SOURCE_CONTEXT_SECRET", 1);
 
@@ -1106,8 +1020,7 @@ describe("Claude provider helpers", () => {
 
     const message = claudeFailureMessage(stdout, "", 1);
 
-    expect(message).toContain("claude provider auth/config failed");
-    expect(message).toContain("error=authentication_failed");
+    expect(message).toBe("claude provider auth/config failed");
     expect(message).not.toContain("SOURCE_CONTEXT_SECRET");
     expect(claudeExitCode(stdout, "", 1)).toBe(4);
   });
@@ -1128,34 +1041,12 @@ describe("Claude provider helpers", () => {
       result: "SOURCE_CONTEXT_SECRET",
     });
 
-    expect(claudeFailureMessage(auth, "", 1)).toContain("claude provider auth/config failed");
+    expect(claudeFailureMessage(auth, "", 1)).toBe("claude provider auth/config failed");
     expect(claudeExitCode(auth, "", 1)).toBe(4);
-    expect(claudeFailureMessage(quota, "", 1)).toContain("claude provider quota/rate-limit failed");
+    expect(claudeFailureMessage(quota, "", 1)).toBe("claude provider quota/rate-limit failed");
     expect(claudeExitCode(quota, "", 1)).toBe(5);
     expect(claudeFailureMessage(auth, "", 1)).not.toContain("SOURCE_CONTEXT_SECRET");
     expect(claudeFailureMessage(quota, "", 1)).not.toContain("SOURCE_CONTEXT_SECRET");
-  });
-
-  it("surfaces the reported OAuth failure shape without leaking result text", () => {
-    const stdout = [
-      JSON.stringify({ type: "assistant", error: "authentication_failed" }),
-      JSON.stringify({
-        type: "result",
-        subtype: "success",
-        is_error: true,
-        result: "Not logged in · Please run /login",
-        terminal_reason: "completed",
-      }),
-    ].join("\n");
-
-    const message = claudeFailureMessage(stdout, "", 1);
-
-    expect(message).toContain("claude provider auth/config failed");
-    expect(message).toContain("error=authentication_failed");
-    expect(message).toContain("is_error=true");
-    expect(message).toContain("reason=not-logged-in");
-    expect(message).not.toContain("Please run /login");
-    expect(claudeExitCode(stdout, "", 1)).toBe(4);
   });
 
   it("omits Claude error.message from stdout failure signals", () => {
@@ -1738,6 +1629,206 @@ describe("extractOpencodeJson", () => {
   });
 });
 
+describe("parseReviewOutput", () => {
+  it("preserves all findings when every finding is valid (fast path)", () => {
+    const output = {
+      findings: [
+        makeFinding({ title: "first", category: "bug" }),
+        makeFinding({ title: "second", category: "security" }),
+        makeFinding({ title: "third", category: "performance" }),
+      ],
+      inspected: { files: ["src/a.ts"], symbols: [], notes: [] },
+    };
+
+    const result = parseReviewOutput(output);
+
+    expect(result.findings).toHaveLength(3);
+    expect(result.findings.map((f: { title: string }) => f.title)).toEqual([
+      "first",
+      "second",
+      "third",
+    ]);
+    expect(result.droppedFindings).toEqual([]);
+    expect(result.inspected.files).toEqual(["src/a.ts"]);
+  });
+
+  it("keeps valid siblings when one finding has an invalid category", () => {
+    const output = {
+      findings: [
+        makeFinding({ title: "first", category: "bug" }),
+        makeFinding({ title: "second", category: "security" }),
+        makeFinding({ title: "third", category: "quality" }), // invalid enum value
+        makeFinding({ title: "fourth", category: "performance" }),
+      ],
+      inspected: { files: [], symbols: [], notes: [] },
+    };
+
+    const result = parseReviewOutput(output);
+
+    expect(result.findings).toHaveLength(3);
+    expect(result.findings.map((f: { title: string }) => f.title)).toEqual([
+      "first",
+      "second",
+      "fourth",
+    ]);
+    expect(result.droppedFindings).toHaveLength(1);
+    const dropped = result.droppedFindings[0]!;
+    expect(dropped.path[0]).toBe("findings");
+    expect(dropped.path[1]).toBe(2);
+    expect(dropped.path).toContain("category");
+    expect(dropped.message).toBeTypeOf("string");
+    expect(dropped.sample).toContain("quality");
+    expect(dropped.sample.length).toBeLessThanOrEqual(200);
+  });
+
+  it("throws ClawpatchError when findings is not an array", () => {
+    const output = {
+      findings: "not-an-array",
+      inspected: { files: [], symbols: [], notes: [] },
+    };
+
+    try {
+      parseReviewOutput(output);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ClawpatchError);
+      expect((err as ClawpatchError).code).toBe("malformed-output");
+      expect((err as ClawpatchError).exitCode).toBe(8);
+      expect((err as Error).message).toMatch(/findings/u);
+      return;
+    }
+    throw new Error("expected parseReviewOutput to throw on non-array findings");
+  });
+
+  it("truncates oversized samples to 200 characters", () => {
+    const longTitle = "x".repeat(500);
+    const output = {
+      findings: [
+        makeFinding({ title: longTitle, category: "quality" }), // invalid → dropped
+      ],
+      inspected: { files: [], symbols: [], notes: [] },
+    };
+
+    const result = parseReviewOutput(output);
+
+    expect(result.droppedFindings).toHaveLength(1);
+    expect(result.droppedFindings[0]!.sample.length).toBeLessThanOrEqual(200);
+    expect(result.droppedFindings[0]!.sample.endsWith("...")).toBe(true);
+  });
+});
+
+function makeBadReview(overrides: Record<string, unknown> = {}): unknown {
+  return {
+    findings: [
+      {
+        title: "x",
+        category: "quality",
+        severity: "medium",
+        confidence: "high",
+        evidence: [],
+        reasoning: "r",
+        reproduction: null,
+        recommendation: "rec",
+        whyTestsDoNotAlreadyCoverThis: "w",
+        suggestedRegressionTest: null,
+        minimumFixScope: "m",
+        ...overrides,
+      },
+    ],
+    inspected: { files: [], symbols: [], notes: [] },
+  };
+}
+
+describe("formatZodError", () => {
+  it("reports invalid enum compactly with bad value and expected list", () => {
+    const input = makeBadReview();
+    const result = reviewOutputSchema.safeParse(input);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    const msg = formatZodError(result.error, input);
+    expect(msg).toMatch(/findings\[0\]\.category="quality"/u);
+    expect(msg).toMatch(/invalid_value/u);
+    expect(msg).toMatch(/expected one of [^()]*\bbug\b/u);
+    expect(msg.split("\n")).toHaveLength(1);
+  });
+
+  it("reports missing required field compactly", () => {
+    const bad = {
+      findings: [
+        {
+          title: "x",
+          category: "bug",
+          severity: "medium",
+          confidence: "high",
+          evidence: [],
+          reproduction: null,
+          recommendation: "rec",
+          whyTestsDoNotAlreadyCoverThis: "w",
+          suggestedRegressionTest: null,
+          minimumFixScope: "m",
+          // reasoning omitted on purpose
+        },
+      ],
+      inspected: { files: [], symbols: [], notes: [] },
+    };
+    const result = reviewOutputSchema.safeParse(bad);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    const msg = formatZodError(result.error, bad);
+    expect(msg).toMatch(/findings\[0\]\.reasoning/u);
+    expect(msg).toMatch(/invalid_type/u);
+    expect(msg).toMatch(/expected string/u);
+  });
+
+  it("truncates long received string values to a bounded preview", () => {
+    const longValue = "a".repeat(500);
+    const issue = formatZodIssue({
+      code: "invalid_type",
+      path: ["findings", 0, "reasoning"],
+      message: "x",
+      expected: "string",
+      received: longValue,
+    } as unknown as Parameters<typeof formatZodIssue>[0]);
+    expect(issue.length).toBeLessThan(longValue.length);
+    expect(issue).toMatch(/findings\[0\]\.reasoning=/u);
+  });
+
+  it("includes a +N more suffix when zod reports many issues", () => {
+    const fakeError = {
+      issues: Array.from({ length: 5 }, (_, i) => ({
+        code: "invalid_type",
+        path: ["x", i],
+        message: "x",
+        expected: "string",
+        received: "n",
+      })),
+    } as unknown as Parameters<typeof formatZodError>[0];
+    const msg = formatZodError(fakeError);
+    expect(msg).toMatch(/\(\+2 more\)$/u);
+  });
+});
+
+describe("parseOrThrow", () => {
+  it("returns parsed data on success", () => {
+    const ok = {
+      findings: [],
+      inspected: { files: [], symbols: [], notes: [] },
+    };
+    expect(parseOrThrow(reviewOutputSchema, ok, "test")).toEqual(ok);
+  });
+
+  it("throws ClawpatchError with malformed-output / exit 8 on bad input", () => {
+    expectMalformed(
+      () =>
+        parseOrThrow(
+          reviewOutputSchema,
+          { findings: [{ category: "quality" }], inspected: {} },
+          "test-label",
+        ),
+      /test-label: schema validation failed: findings\[0\]/u,
+    );
+  });
+});
+
 describe("providerByName", () => {
   it("returns provider instances for optional CLI-backed providers", () => {
     expect(providerByName("acpx").name).toBe("acpx");
@@ -1755,8 +1846,11 @@ describe("providerByName", () => {
   });
 
   it("rejects direct model API providers", () => {
-    expect(() => providerByName("minimax")).toThrow(/unsupported provider: minimax/u);
     expect(() => providerByName("deepseek")).toThrow(/unsupported provider: deepseek/u);
+  });
+
+  it("accepts minimax", () => {
+    expect(providerByName("minimax").name).toBe("minimax");
   });
 });
 
