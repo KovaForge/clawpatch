@@ -912,7 +912,9 @@ const claudeProvider: Provider = {
   },
 };
 
-const MINIMAX_API_BASE = "https://api.minimax.chat/v1";
+// Hermes-compatible: uses api.minimax.io/anthropic/v1/messages with Bearer auth.
+// The sk-cp-AD-... key format is the standard MiniMax API key used by Hermes.
+const MINIMAX_API_BASE = "https://api.minimax.io/anthropic/v1/messages";
 const MINIMAX_DEFAULT_TIMEOUT_MS = 180_000;
 
 const minimaxProvider: Provider = {
@@ -972,21 +974,22 @@ async function runMinimaxJson(
 
   let response: Response;
   try {
-    response = await fetch(`${MINIMAX_API_BASE}/text/chatcompletion_v2`, {
+    response = await fetch(`${MINIMAX_API_BASE}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
         model,
+        max_tokens: 4096,
         messages: [
           {
             role: "user",
             content: `${readOnlySystem}${prompt}\n\nProvider output schema:\n${JSON.stringify(schema, null, 2)}\n\nReturn only one JSON object matching the schema.`,
           },
         ],
-        stream: false,
       }),
       signal: controller.signal,
     });
@@ -1004,13 +1007,14 @@ async function runMinimaxJson(
   }
 
   const body = await response.json() as Record<string, unknown>;
-  const choices = body["choices"] as unknown[] | undefined;
-  if (!Array.isArray(choices) || choices.length === 0) {
-    throw new ClawpatchError("minimax response has no choices", 8, "malformed-output");
-  }
-  const firstChoice = choices[0] as Record<string, unknown>;
-  const message = firstChoice["message"] as Record<string, unknown> | undefined;
-  const content = typeof message?.["content"] === "string" ? message["content"] : String(firstChoice["reasoning"] ?? "");
+  // Anthropic Messages format: { content: [{ type: "text", text: "..." }] }
+  const contentBlock = (body["content"] as unknown[])?.[0] as Record<string, unknown> | undefined;
+  const content =
+    typeof contentBlock?.["text"] === "string"
+      ? contentBlock["text"]
+      : typeof body["content"] === "string"
+        ? body["content"]
+        : String(body["content"] ?? "");
 
   const parsed = extractJson(content);
   if (parsed === null) {
