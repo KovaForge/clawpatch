@@ -66,6 +66,12 @@ package coordinates; set it to `true` only when that network access is acceptabl
 [Code review > Registry verifier](code-review.md#registry-verifier) for
 the full verdict matrix.
 
+Go package discovery has a two-minute deadline. `CLAWPATCH_GO_LIST_TIMEOUT_MS`
+accepts `1` through `2147483647` milliseconds; invalid values fall back to two
+minutes and fractional values are truncated. If `go list` times out, Clawpatch
+discards incomplete output and maps packages from repository files instead.
+Process cleanup can add a bounded delay after the discovery deadline.
+
 Environment overrides:
 
 - `CLAWPATCH_STATE_DIR`
@@ -73,6 +79,7 @@ Environment overrides:
 - `CLAWPATCH_MODEL`
 - `CLAWPATCH_REASONING_EFFORT`
 - `CLAWPATCH_CLAUDE_AUTH_CONTEXT` (`isolated` or `host`; default `isolated`)
+- `CLAWPATCH_GO_LIST_TIMEOUT_MS` (Go discovery deadline; default `120000`, or 2 minutes)
 - `CLAWPATCH_GIT_PUSH_TIMEOUT_MS` (default `600000`, or 10 minutes)
 - `CLAWPATCH_GH_PR_CREATE_TIMEOUT_MS` (default `300000`, or 5 minutes)
 - `CLAWPATCH_TASKKILL_TIMEOUT_MS` (Windows cleanup deadline; default `5000`, or 5 seconds)
