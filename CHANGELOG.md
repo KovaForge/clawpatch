@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.7.4 - Unreleased
+
 ## 0.7.3 - 2026-09-05
 
 **Highlights:** Broader Rust module coverage and bounded timeouts for Go discovery and pull-request publishing.
